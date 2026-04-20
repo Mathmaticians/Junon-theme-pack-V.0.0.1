@@ -1,0 +1,788 @@
+// ==UserScript==
+// @name         Parasidieum
+// @namespace    http://tampermonkey.net/
+// @version      2026-04-04
+// @description  Account link
+// @author       Parasideum
+// @match        https://junon.io/*
+// @grant        none
+// ==/UserScript==
+(function () {
+    'use strict';
+
+    const DISCORD_CLIENT_ID = '1489897901063667773';
+    const REDIRECT_URI      = 'https://junon.io/';
+    const SCOPE             = 'identify';
+    const SAVE_PREFIX       = 'ps_sync_';
+    const SYNC_VERSION      = 1;
+
+    const PARASIDIEUM_KEYS = [
+        'ps_custom_theme',
+        'junonESPSettings3',
+    ];
+    const INLINE_SETTINGS_KEY = 'ps_sync_inline_settings';
+
+    let discordUser   = null;   // { id, username, discriminator, avatar }
+    let syncEnabled   = false;
+    let lastSyncTime  = 0;
+
+    const syncStyle = document.createElement('style');
+    syncStyle.textContent = `
+        #ps_discord_sync_btn {
+            position: fixed;
+            bottom: 20px;
+            left: 530px;
+            z-index: 10000;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background-color 0.2s, transform 0.1s;
+            background: linear-gradient(135deg, rgba(88,101,242,0.9), rgba(71,82,196,0.9));
+        }
+        #ps_discord_sync_btn:hover  { filter: brightness(1.15); }
+        #ps_discord_sync_btn:active { transform: scale(0.95); }
+        #ps_discord_sync_btn.linked {
+            background: linear-gradient(135deg, rgba(60,180,80,0.88), rgba(40,150,60,0.88));
+        }
+
+        #ps_sync_box {
+            position: fixed;
+            bottom: 60px;
+            left: 530px;
+            z-index: 10000;
+            width: 310px;
+            border-radius: 14px;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 6px 32px rgba(0,0,0,0.55);
+            backdrop-filter: blur(14px);
+            background: rgba(18, 18, 30, 0.97);
+            border: 1px solid rgba(88,101,242,0.4);
+        }
+
+        #ps_sync_header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            background: rgba(88,101,242,0.22);
+            border-bottom: 1px solid rgba(88,101,242,0.25);
+            cursor: grab;
+            user-select: none;
+        }
+        #ps_sync_header:active { cursor: grabbing; }
+        #ps_sync_header_title {
+            color: rgba(180,190,255,0.95);
+            font-size: 12px;
+            font-weight: bold;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            display: flex;
+            align-items: center;
+            gap: 7px;
+        }
+        #ps_sync_header_title::before {
+            content: '';
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: rgba(88,101,242,0.9);
+            box-shadow: 0 0 6px rgba(88,101,242,0.8);
+        }
+        #ps_sync_header_title.linked::before {
+            background: rgba(60,220,100,0.9);
+            box-shadow: 0 0 6px rgba(60,220,100,0.8);
+        }
+        #ps_sync_close {
+            background: none; border: none;
+            color: rgba(255,255,255,0.45);
+            font-size: 14px; cursor: pointer;
+            font-weight: bold; padding: 0 4px;
+        }
+        #ps_sync_close:hover { color: rgba(255,100,100,1); }
+
+        #ps_sync_profile {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        #ps_sync_avatar {
+            width: 40px; height: 40px;
+            border-radius: 50%;
+            border: 2px solid rgba(88,101,242,0.7);
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+        #ps_sync_avatar_placeholder {
+            width: 40px; height: 40px;
+            border-radius: 50%;
+            background: rgba(88,101,242,0.2);
+            border: 2px solid rgba(88,101,242,0.4);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; flex-shrink: 0;
+        }
+        #ps_sync_user_info { flex: 1; overflow: hidden; }
+        #ps_sync_username {
+            font-size: 13px; font-weight: bold;
+            color: rgba(255,255,255,0.92);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        #ps_sync_userid {
+            font-size: 10px;
+            color: rgba(255,255,255,0.38);
+            font-family: monospace;
+            margin-top: 1px;
+        }
+        #ps_sync_unlink_btn {
+            background: rgba(255,60,60,0.12);
+            border: 1px solid rgba(255,60,60,0.3);
+            border-radius: 7px;
+            padding: 4px 10px;
+            color: rgba(255,120,120,0.9);
+            font-size: 11px; font-weight: bold;
+            cursor: pointer; flex-shrink: 0;
+            transition: background 0.13s;
+        }
+        #ps_sync_unlink_btn:hover { background: rgba(255,60,60,0.28); color: #ff9090; }
+
+        #ps_sync_body { padding: 0; display: flex; flex-direction: column; gap: 0; }
+
+        .ps_sync_section {
+            padding: 10px 14px 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .ps_sync_section:last-child { border-bottom: none; }
+        .ps_sync_section_label {
+            font-size: 10px; font-weight: bold;
+            letter-spacing: 0.08em; text-transform: uppercase;
+            color: rgba(255,255,255,0.35); margin-bottom: 7px;
+        }
+
+        .ps_sync_action_row { display: flex; gap: 6px; }
+        .ps_sync_btn {
+            flex: 1; padding: 7px 8px;
+            border-radius: 8px; border: 1px solid rgba(255,255,255,0.14);
+            background: rgba(255,255,255,0.07);
+            color: rgba(255,255,255,0.7);
+            font-size: 11px; font-weight: bold;
+            cursor: pointer; text-align: center;
+            transition: background 0.13s, color 0.13s, border-color 0.13s;
+        }
+        .ps_sync_btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
+        .ps_sync_btn.primary {
+            background: rgba(88,101,242,0.2);
+            border-color: rgba(88,101,242,0.5);
+            color: rgba(180,190,255,0.95);
+        }
+        .ps_sync_btn.primary:hover {
+            background: rgba(88,101,242,0.38);
+            border-color: rgba(88,101,242,0.8);
+            color: #fff;
+        }
+        .ps_sync_btn.success {
+            background: rgba(60,200,90,0.18);
+            border-color: rgba(60,200,90,0.4);
+            color: rgba(120,240,160,0.95);
+        }
+        .ps_sync_btn.success:hover {
+            background: rgba(60,200,90,0.32);
+            border-color: rgba(60,200,90,0.7);
+            color: #fff;
+        }
+        .ps_sync_btn.danger {
+            background: rgba(255,60,60,0.12);
+            border-color: rgba(255,60,60,0.3);
+            color: rgba(255,140,140,0.9);
+        }
+        .ps_sync_btn.danger:hover {
+            background: rgba(255,60,60,0.25);
+            border-color: rgba(255,60,60,0.5);
+            color: #ff9090;
+        }
+
+        #ps_sync_login_section {
+            padding: 18px 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+        #ps_sync_login_icon {
+            font-size: 36px;
+            filter: grayscale(0.3);
+        }
+        #ps_sync_login_desc {
+            font-size: 12px;
+            color: rgba(255,255,255,0.5);
+            text-align: center;
+            line-height: 1.6;
+        }
+        #ps_sync_login_btn {
+            width: 100%;
+            padding: 10px;
+            border-radius: 10px;
+            border: none;
+            background: linear-gradient(135deg, rgba(88,101,242,0.92), rgba(71,82,196,0.92));
+            color: white;
+            font-size: 13px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: filter 0.15s, transform 0.1s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        #ps_sync_login_btn:hover  { filter: brightness(1.18); }
+        #ps_sync_login_btn:active { transform: scale(0.97); }
+
+        #ps_sync_status_strip {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 14px 7px;
+            font-size: 10px;
+            color: rgba(255,255,255,0.35);
+            border-top: 1px solid rgba(255,255,255,0.04);
+            background: rgba(0,0,0,0.15);
+        }
+        #ps_sync_status_dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.2);
+            flex-shrink: 0;
+            transition: background 0.3s;
+        }
+        #ps_sync_status_dot.ok    { background: rgba(60,220,100,0.85); box-shadow: 0 0 5px rgba(60,220,100,0.6); }
+        #ps_sync_status_dot.busy  { background: rgba(255,200,60,0.85); animation: syncPulse 0.8s infinite; }
+        #ps_sync_status_dot.error { background: rgba(255,80,80,0.85); }
+        @keyframes syncPulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+        #ps_sync_code_area {
+            width: 100%;
+            box-sizing: border-box;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 8px;
+            padding: 7px 9px;
+            color: rgba(255,255,255,0.7);
+            font-size: 10px;
+            font-family: monospace;
+            outline: none;
+            resize: none;
+            height: 56px;
+            margin-top: 6px;
+        }
+        #ps_sync_code_area::placeholder { color: rgba(255,255,255,0.22); }
+        #ps_sync_code_area:focus { border-color: rgba(88,101,242,0.5); }
+
+        .ps_sync_save_list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .ps_sync_save_item {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 11px;
+            color: rgba(255,255,255,0.55);
+        }
+        .ps_sync_save_item::before {
+            content: '✓';
+            color: rgba(60,220,100,0.8);
+            font-size: 10px;
+            font-weight: bold;
+            flex-shrink: 0;
+        }
+
+        .ps_sync_toggle_row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .ps_sync_toggle_label {
+            font-size: 11px;
+            color: rgba(255,255,255,0.6);
+        }
+        .ps_sync_toggle {
+            padding: 3px 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.15);
+            background: rgba(255,255,255,0.07);
+            color: rgba(255,255,255,0.5);
+            font-size: 11px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.12s, color 0.12s;
+        }
+        .ps_sync_toggle.on {
+            background: rgba(88,101,242,0.2);
+            border-color: rgba(88,101,242,0.5);
+            color: rgba(180,190,255,0.95);
+        }
+    `;
+    document.head.appendChild(syncStyle);
+
+    const syncBtn = document.createElement('button');
+    syncBtn.id = 'ps_discord_sync_btn';
+    syncBtn.textContent = 'Discord Sync';
+    document.body.appendChild(syncBtn);
+
+    const syncBox = document.createElement('div');
+    syncBox.id = 'ps_sync_box';
+    syncBox.innerHTML = `
+        <div id="ps_sync_header">
+            <div id="ps_sync_header_title">Discord Sync</div>
+            <button id="ps_sync_close">✕</button>
+        </div>
+        <div id="ps_sync_inner">
+            <!-- login or profile injected here -->
+        </div>
+        <div id="ps_sync_status_strip">
+            <div id="ps_sync_status_dot"></div>
+            <span id="ps_sync_status_text">Not linked</span>
+        </div>
+    `;
+    document.body.appendChild(syncBox);
+
+    (function makeSyncDraggable() {
+        const header = document.getElementById('ps_sync_header');
+        let dragging = false, ox, oy;
+        header.addEventListener('mousedown', e => {
+            if (e.target.id === 'ps_sync_close') return;
+            dragging = true;
+            ox = e.clientX - syncBox.getBoundingClientRect().left;
+            oy = e.clientY - syncBox.getBoundingClientRect().top;
+            syncBox.style.bottom = 'auto';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', e => {
+            if (!dragging) return;
+            syncBox.style.left = (e.clientX - ox) + 'px';
+            syncBox.style.top  = (e.clientY - oy) + 'px';
+        });
+        document.addEventListener('mouseup', () => { dragging = false; });
+    })();
+
+    document.getElementById('ps_sync_close').addEventListener('click', () => {
+        syncBox.style.display = 'none';
+    });
+
+    syncBtn.addEventListener('click', () => {
+        syncBox.style.display = syncBox.style.display === 'flex' ? 'none' : 'flex';
+    });
+
+    function setStatus(text, state = '') {
+        const dot  = document.getElementById('ps_sync_status_dot');
+        const span = document.getElementById('ps_sync_status_text');
+        if (dot)  { dot.className  = 'ps_sync_status_dot' + (state ? ' ' + state : ''); }
+        if (span) { span.textContent = text; }
+    }
+
+    function toast(msg, success = true) {
+        let el = document.getElementById('ps_sync_toast');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'ps_sync_toast';
+            el.style.cssText = `
+                position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+                z-index:11002;padding:12px 22px;border-radius:12px;
+                color:#fff;font-size:13px;font-weight:bold;
+                pointer-events:none;opacity:0;transition:opacity 0.2s;
+                text-align:center;backdrop-filter:blur(8px);
+                box-shadow:0 4px 20px rgba(0,0,0,0.5);
+            `;
+            document.body.appendChild(el);
+        }
+        el.textContent = msg;
+        el.style.background = success
+            ? 'rgba(40,160,80,0.95)'
+            : 'rgba(200,60,60,0.95)';
+        el.style.opacity = '1';
+        clearTimeout(el._t);
+        el._t = setTimeout(() => { el.style.opacity = '0'; }, 2600);
+    }
+
+    function buildSavePayload() {
+        const payload = {
+            v:    SYNC_VERSION,
+            ts:   Date.now(),
+            uid:  discordUser ? discordUser.id : 'guest',
+            data: {},
+        };
+
+        PARASIDIEUM_KEYS.forEach(k => {
+            const v = localStorage.getItem(k);
+            if (v !== null) payload.data[k] = v;
+        });
+
+        const roboKey = localStorage.getItem('ps_robo_api_key');
+        if (roboKey) payload.data['ps_robo_api_key'] = roboKey;
+
+        try {
+            const snap = {};
+            if (typeof currentTheme    !== 'undefined') snap.currentTheme    = currentTheme;
+            if (typeof musicEnabled    !== 'undefined') snap.musicEnabled    = musicEnabled;
+            if (typeof bubblesEnabled  !== 'undefined') snap.bubblesEnabled  = bubblesEnabled;
+            if (typeof borderEnabled   !== 'undefined') snap.borderEnabled   = borderEnabled;
+            if (typeof extraEffectsEnabled !== 'undefined') snap.extraEffectsEnabled = extraEffectsEnabled;
+            if (typeof originalMode    !== 'undefined') snap.originalMode    = originalMode;
+            if (Object.keys(snap).length) {
+                localStorage.setItem(INLINE_SETTINGS_KEY, JSON.stringify(snap));
+                payload.data[INLINE_SETTINGS_KEY] = JSON.stringify(snap);
+            }
+        } catch (_) {}
+
+        return payload;
+    }
+
+    function encodeSave(payload) {
+        return btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+    }
+
+    function decodeSave(code) {
+        try {
+            return JSON.parse(decodeURIComponent(escape(atob(code.trim()))));
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function applySavePayload(payload) {
+        if (!payload || !payload.data) return false;
+        Object.entries(payload.data).forEach(([k, v]) => {
+            localStorage.setItem(k, v);
+        });
+        return true;
+    }
+
+    function cloudSaveKey(uid) { return `${SAVE_PREFIX}cloud_${uid}`; }
+
+    function cloudSave() {
+        if (!discordUser) return false;
+        const payload = buildSavePayload();
+        try {
+            localStorage.setItem(cloudSaveKey(discordUser.id), encodeSave(payload));
+            lastSyncTime = Date.now();
+            setStatus(`Saved · ${new Date().toLocaleTimeString()}`, 'ok');
+            return true;
+        } catch (e) {
+            setStatus('Save failed — storage full?', 'error');
+            return false;
+        }
+    }
+
+    function cloudLoad() {
+        if (!discordUser) return false;
+        const raw = localStorage.getItem(cloudSaveKey(discordUser.id));
+        if (!raw) { setStatus('No cloud save found', 'error'); return false; }
+        const payload = decodeSave(raw);
+        if (!payload) { setStatus('Corrupt save data', 'error'); return false; }
+        if (applySavePayload(payload)) {
+            setStatus(`Loaded · saved ${new Date(payload.ts).toLocaleTimeString()}`, 'ok');
+            toast('Settings loaded! Refresh to apply all changes.');
+            return true;
+        }
+        return false;
+    }
+
+    const _origSetItem = localStorage.setItem.bind(localStorage);
+    localStorage.setItem = function (key, value) {
+        _origSetItem(key, value);
+        if (syncEnabled && discordUser && PARASIDIEUM_KEYS.includes(key)) {
+            clearTimeout(localStorage._syncDebounce);
+            localStorage._syncDebounce = setTimeout(cloudSave, 1500);
+        }
+    };
+
+    function buildOAuthURL() {
+        const params = new URLSearchParams({
+            client_id:     DISCORD_CLIENT_ID,
+            redirect_uri:  REDIRECT_URI,
+            response_type: 'token',
+            scope:         SCOPE,
+        });
+        return `https://discord.com/oauth2/authorize?${params}`;
+    }
+
+    async function fetchDiscordUser(accessToken) {
+        const res = await fetch('https://discord.com/api/users/@me', {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!res.ok) throw new Error('Discord API error ' + res.status);
+        return res.json();
+    }
+
+    function getAvatarURL(user) {
+        if (!user.avatar) return null;
+        return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`;
+    }
+
+    function extractTokenFromHash() {
+        const hash = window.location.hash.slice(1);
+        const params = new URLSearchParams(hash);
+        const token = params.get('access_token');
+        const type  = params.get('token_type');
+        if (token && type === 'Bearer') {
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+            return token;
+        }
+        return null;
+    }
+
+    function storeSession(user, token) {
+        localStorage.setItem(`${SAVE_PREFIX}session`, JSON.stringify({ user, token, ts: Date.now() }));
+    }
+
+    function loadSession() {
+        try {
+            const raw = localStorage.getItem(`${SAVE_PREFIX}session`);
+            if (!raw) return null;
+            const s = JSON.parse(raw);
+            if (Date.now() - s.ts > 6 * 24 * 60 * 60 * 1000) return null;
+            return s;
+        } catch (_) { return null; }
+    }
+
+    function clearSession() {
+        localStorage.removeItem(`${SAVE_PREFIX}session`);
+    }
+
+    function renderLinkedUI(user) {
+        const inner = document.getElementById('ps_sync_inner');
+        const avatarURL = getAvatarURL(user);
+        const tag = user.discriminator && user.discriminator !== '0'
+            ? `${user.username}#${user.discriminator}`
+            : user.username;
+
+        inner.innerHTML = `
+            <!-- Profile row -->
+            <div id="ps_sync_profile">
+                ${avatarURL
+                    ? `<img id="ps_sync_avatar" src="${avatarURL}" alt="avatar">`
+                    : `<div id="ps_sync_avatar_placeholder">👤</div>`}
+                <div id="ps_sync_user_info">
+                    <div id="ps_sync_username">${escHTML(tag)}</div>
+                    <div id="ps_sync_userid">ID: ${escHTML(user.id)}</div>
+                </div>
+                <button id="ps_sync_unlink_btn">Unlink</button>
+            </div>
+
+            <div id="ps_sync_body">
+                <!-- What gets saved -->
+                <div class="ps_sync_section">
+                    <div class="ps_sync_section_label">What gets saved</div>
+                    <div class="ps_sync_save_list">
+                        <div class="ps_sync_save_item">Custom theme (colour, images, music)</div>
+                        <div class="ps_sync_save_item">ESP settings</div>
+                        <div class="ps_sync_save_item">Robo-Po API key</div>
+                        <div class="ps_sync_save_item">Theme selection &amp; toggles</div>
+                    </div>
+                </div>
+
+                <!-- Auto-sync toggle -->
+                <div class="ps_sync_section">
+                    <div class="ps_sync_toggle_row">
+                        <span class="ps_sync_toggle_label">Auto-save on change</span>
+                        <button class="ps_sync_toggle" id="ps_sync_auto_toggle">OFF</button>
+                    </div>
+                </div>
+
+                <!-- Manual save/load -->
+                <div class="ps_sync_section">
+                    <div class="ps_sync_section_label">This device</div>
+                    <div class="ps_sync_action_row">
+                        <button class="ps_sync_btn primary" id="ps_sync_save_btn">⬆ Save now</button>
+                        <button class="ps_sync_btn success" id="ps_sync_load_btn">⬇ Load save</button>
+                    </div>
+                </div>
+
+                <!-- Export / import code for cross-device sync -->
+                <div class="ps_sync_section">
+                    <div class="ps_sync_section_label">Cross-device sync code</div>
+                    <div class="ps_sync_action_row">
+                        <button class="ps_sync_btn" id="ps_sync_export_btn">Export code</button>
+                        <button class="ps_sync_btn" id="ps_sync_import_apply_btn">Import code</button>
+                    </div>
+                    <textarea id="ps_sync_code_area" placeholder="Paste import code here, or click Export to generate one…" spellcheck="false"></textarea>
+                    <div class="ps_sync_action_row" style="margin-top:5px;">
+                        <button class="ps_sync_btn" id="ps_sync_copy_btn">Copy to clipboard</button>
+                    </div>
+                </div>
+
+                <!-- Danger zone -->
+                <div class="ps_sync_section">
+                    <div class="ps_sync_section_label">Danger zone</div>
+                    <div class="ps_sync_action_row">
+                        <button class="ps_sync_btn danger" id="ps_sync_wipe_btn">Wipe cloud save</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.getElementById('ps_sync_header_title').className = 'linked';
+        syncBtn.classList.add('linked');
+        syncBtn.textContent = '✓ Discord Linked';
+
+        setStatus(`Linked as ${escHTML(tag)}`, 'ok');
+
+        document.getElementById('ps_sync_unlink_btn').addEventListener('click', () => {
+            clearSession();
+            discordUser  = null;
+            syncEnabled  = false;
+            renderUnlinkedUI();
+            toast('Account unlinked.');
+        });
+
+        const autoToggle = document.getElementById('ps_sync_auto_toggle');
+        autoToggle.textContent = syncEnabled ? 'ON' : 'OFF';
+        autoToggle.className = 'ps_sync_toggle' + (syncEnabled ? ' on' : '');
+        autoToggle.addEventListener('click', () => {
+            syncEnabled = !syncEnabled;
+            autoToggle.textContent = syncEnabled ? 'ON' : 'OFF';
+            autoToggle.className = 'ps_sync_toggle' + (syncEnabled ? ' on' : '');
+            toast(syncEnabled ? 'Auto-save enabled' : 'Auto-save disabled');
+        });
+
+        document.getElementById('ps_sync_save_btn').addEventListener('click', () => {
+            setStatus('Saving…', 'busy');
+            setTimeout(() => {
+                const ok = cloudSave();
+                if (ok) toast('Saved to this device!');
+            }, 200);
+        });
+
+        document.getElementById('ps_sync_load_btn').addEventListener('click', () => {
+            if (!confirm('Load saved settings? This will overwrite your current settings on next refresh.')) return;
+            setStatus('Loading…', 'busy');
+            setTimeout(() => cloudLoad(), 200);
+        });
+
+        document.getElementById('ps_sync_export_btn').addEventListener('click', () => {
+            const code = encodeSave(buildSavePayload());
+            document.getElementById('ps_sync_code_area').value = code;
+            setStatus('Export code generated', 'ok');
+        });
+
+        document.getElementById('ps_sync_copy_btn').addEventListener('click', () => {
+            const area = document.getElementById('ps_sync_code_area');
+            if (!area.value.trim()) {
+                toast('Generate an export code first.', false);
+                return;
+            }
+            navigator.clipboard.writeText(area.value.trim())
+                .then(() => toast('Copied to clipboard!'))
+                .catch(() => { area.select(); document.execCommand('copy'); toast('Copied!'); });
+        });
+
+        document.getElementById('ps_sync_import_apply_btn').addEventListener('click', () => {
+            const raw = document.getElementById('ps_sync_code_area').value.trim();
+            if (!raw) { toast('Paste an import code first.', false); return; }
+            const payload = decodeSave(raw);
+            if (!payload) { toast('Invalid code.', false); setStatus('Invalid import code', 'error'); return; }
+            if (!confirm('Apply this import? Your current settings will be replaced on next page refresh.')) return;
+            if (applySavePayload(payload)) {
+                toast('Imported! Refresh to apply all changes.');
+                setStatus(`Imported save from ${new Date(payload.ts).toLocaleString()}`, 'ok');
+            } else {
+                toast('Import failed.', false);
+            }
+        });
+
+        document.getElementById('ps_sync_wipe_btn').addEventListener('click', () => {
+            if (!confirm('Delete your cloud save on this device? (Your actual settings are NOT deleted, only the backup copy.)')) return;
+            localStorage.removeItem(cloudSaveKey(user.id));
+            toast('Cloud save wiped.');
+            setStatus('Cloud save deleted', 'error');
+        });
+    }
+
+    function renderUnlinkedUI() {
+        const inner = document.getElementById('ps_sync_inner');
+        inner.innerHTML = `
+            <div id="ps_sync_login_section">
+                <div id="ps_sync_login_icon">🤖</div>
+                <div id="ps_sync_login_desc">
+                    Link your Discord account to save your Parasidieum theme, ESP settings, and more.<br><br>
+                    Your data stays on <em>this device</em>. Use the export code to move between devices.
+                </div>
+                <button id="ps_sync_login_btn">
+                    <svg width="20" height="20" viewBox="0 0 71 55" fill="white" xmlns="http://www.w3.org/2000/svg"><path d="M60.1 4.9A58.5 58.5 0 0 0 45.7.8a.2.2 0 0 0-.2.1 40.7 40.7 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0A37.9 37.9 0 0 0 25.6.9a.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 11 4.9a.2.2 0 0 0-.1.1C1.6 19.1-.9 32.9.3 46.5a.2.2 0 0 0 .1.2 58.8 58.8 0 0 0 17.7 8.9.2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.2 24 5.2 35.3 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4 36.2 36.2 0 0 1-5.6 2.6.2.2 0 0 0-.1.3 47 47 0 0 0 3.6 5.9.2.2 0 0 0 .3.1 58.6 58.6 0 0 0 17.7-8.9.2.2 0 0 0 .1-.2c1.5-15.5-2.5-29.2-10.5-41.5a.2.2 0 0 0-.1-.1ZM23.7 38.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1c3.6 0 6.5 3.2 6.4 7.1 0 3.9-2.8 7.1-6.4 7.1Zm23.7 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1c3.6 0 6.5 3.2 6.4 7.1 0 3.9-2.8 7.1-6.4 7.1Z"/></svg>
+                    Login with Discord
+                </button>
+            </div>
+        `;
+
+        document.getElementById('ps_sync_header_title').className = '';
+        syncBtn.classList.remove('linked');
+        syncBtn.textContent = 'Discord Sync';
+        setStatus('Not linked', '');
+
+        document.getElementById('ps_sync_login_btn').addEventListener('click', () => {
+            if (DISCORD_CLIENT_ID === 'YOUR_CLIENT_ID_HERE') {
+                toast('Set your Discord Client ID in the script config first.', false);
+                return;
+            }
+            window.open(buildOAuthURL(), '_self');
+        });
+    }
+
+    function escHTML(s) {
+        return String(s)
+            .replace(/&/g,'&amp;')
+            .replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;')
+            .replace(/"/g,'&quot;');
+    }
+
+    async function init() {
+        const freshToken = extractTokenFromHash();
+        if (freshToken) {
+            setStatus('Authenticating…', 'busy');
+            try {
+                const user = await fetchDiscordUser(freshToken);
+                storeSession(user, freshToken);
+                discordUser = user;
+                renderLinkedUI(user);
+                cloudSave();
+                toast(`Linked as ${user.username}! Settings saved.`);
+                syncBox.style.display = 'flex';
+            } catch (e) {
+                toast('Discord auth failed: ' + e.message, false);
+                setStatus('Auth failed', 'error');
+                renderUnlinkedUI();
+            }
+            return;
+        }
+        const session = loadSession();
+        if (session) {
+            try {
+                const user = await fetchDiscordUser(session.token);
+                storeSession(user, session.token);
+                discordUser = user;
+                renderLinkedUI(user);
+                setStatus(`Auto-restored · ${user.username}`, 'ok');
+            } catch (_) {
+                clearSession();
+                renderUnlinkedUI();
+            }
+        } else {
+            renderUnlinkedUI();
+        }
+    }
+    if (document.body) {
+        init();
+    } else {
+        document.addEventListener('DOMContentLoaded', init);
+    }
+
+})();
